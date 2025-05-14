@@ -23,8 +23,11 @@ def start_gui():
         aapl_path = filedialog.askopenfilename(title="Select AAPL 8-K HTML", filetypes=[("HTML files", "*.htm *.html")])
         if not aapl_path:
             return
+        xsd_path = filedialog.askopenfilename(title="Select Example xsd", filetypes=[("XSD files", "*.xsd")])
+        if not aapl_path:
+            return
         try:
-            result = update_12b_section(msft_path, aapl_path)
+            result = update_12b_section(msft_path, aapl_path, xsd_path)
             messagebox.showinfo("12(b) Replacement Complete", result)
         except Exception as e:
             messagebox.showerror("Error", str(e))
@@ -51,7 +54,7 @@ def start_gui():
     label2 = tk.Label(root, text="Replace MSFT 12(b) Section with AAPL Data")
     label2.pack(pady=(5, 0))
 
-    button_replace = tk.Button(root, text="Select MSFT + AAPL HTML Files", command=replace_12b)
+    button_replace = tk.Button(root, text="Select MSFT + AAPL HTML + xsd Files", command=replace_12b)
     button_replace.pack(pady=10)
 
     root.mainloop()

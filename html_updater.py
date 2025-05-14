@@ -2,12 +2,11 @@ import re
 import os
 from pathlib import Path
 
-def update_12b_section(msft_path, aapl_path, output_path=None):
+def update_12b_section(msft_path, aapl_path, xsd_path, output_path=None):
     with open(aapl_path, 'r', encoding='utf-8') as f:
         aapl_html = f.read()
 
     fields = ["Security12bTitle", "TradingSymbol", "SecurityExchangeName"]
-    msft_blocks = {}
     aapl_values = {}
 
     for field in fields:
@@ -22,12 +21,22 @@ def update_12b_section(msft_path, aapl_path, output_path=None):
     with open(msft_path, 'r', encoding='utf-8') as f:
         msft_html = f.read()
 
-    updated_html = msft_html
+    updated_html = update_msft_namespace_and_refs(msft_html, aapl_html)
 
-    for field in fields:
-        pattern = fr'(<ix:nonNumeric[^>]+name="dei:{field}"[^>]*>)(.*?)(</ix:nonNumeric>)'
-        msft_blocks[field] = list(re.finditer(pattern, msft_html, re.DOTALL))
+    fields_to_replace = [
+        "EntityRegistrantName",  # Apple Inc.
+        "EntityFileNumber",  # 001-36743
+        "EntityAddressAddressLine1",  # One Apple Park Way
+        "EntityAddressCityOrTown",  # Cupertino
+        "EntityAddressStateOrProvince",  # California
+        "EntityAddressPostalZipCode",  # 95014
+        "CityAreaCode",  # 408
+        "LocalPhoneNumber",  # 996-1010
+        "EntityIncorporationStateCountryCode",  # California
+        "EntityTaxIdentificationNumber",  # 94-2404110
+    ]
 
+    updated_html = replace_dei_fields(updated_html, aapl_html, fields_to_replace)
 
     # Step 2: Replace data fields inside repeated blocks
     # Get new matches from updated_html
@@ -71,7 +80,7 @@ def parse_stock_first(msft_path, max_rows):
     target_tr = '''<tr style="height:10pt;white-space:pre-wrap;word-break:break-word;">
      <td style="padding-top:0in;padding-left:0in;vertical-align:bottom;padding-bottom:0in;padding-right:0in;"><p style="font-size:10pt;margin-top:2pt;font-family:Times New Roman;margin-bottom:0;text-align:left;"><span style="font-family:Arial;"><ix:nonNumeric id="F_90a2aa2b-069a-431b-9289-956d06186026" contextRef="C_01_002" name="dei:Security12bTitle"><span style="color:#000000;white-space:pre-wrap;font-weight:bold;font-kerning:none;min-width:fit-content;">Common stock, $0.00000625 par value per share</span></ix:nonNumeric></span></p></td>
      <td style="padding-top:0in;padding-left:0in;vertical-align:top;padding-bottom:0in;padding-right:0in;text-align:left;"><p style="font-size:10pt;margin-top:2pt;font-family:Times New Roman;margin-bottom:0;text-align:center;"><span style="white-space:pre-wrap;font-family:Arial;font-kerning:none;min-width:fit-content;">&#160;</span></p></td>
-     <td style="padding-top:0in;padding-left:0in;vertical-align:bottom;padding-bottom:0in;padding-right:0in;text-align:left;"><p style="font-size:10pt;margin-top:2pt;font-family:Times New Roman;margin-bottom:0;text-align:center;"><span style="font-family:Arial;"><ix:nonNumeric id="F_ff724dc0-c97a-44b6-94e7-bc16e4a380b1" contextRef="C_01_002" name="dei:TradingSymbol"><span style="text-transform:uppercase;color:#000000;white-space:pre-wrap;font-weight:bold;font-kerning:none;min-width:fit-content;">MSFT</span></ix:nonNumeric></span></p></td>
+     <td style="padding-top:0in;padding-left:0in;vertical-align:bottom;padding-bottom:0in;padding-right:0in;text-align:left;"><p style="font-size:10pt;margin-top:2pt;font-family:Times New Roman;margin-bottom:0;text-align:center;"><span style="font-family:Arial;"><ix:nonNumeric id="F_ff724dc0-c97a-44b6-94e7-bc16e4a380b1" contextRef="C_01_002" name="dei:TradingSymbol"><span style="text-transform:uppercase;color:#000000;white-space:pre-wrap;font-weight:bold;font-kerning:none;min-width:fit-content;">EXAP</span></ix:nonNumeric></span></p></td>
      <td style="padding-top:0in;padding-left:0in;vertical-align:top;padding-bottom:0in;padding-right:0in;"><p style="font-size:10pt;margin-top:2pt;font-family:Times New Roman;margin-bottom:0;text-align:left;"><span style="white-space:pre-wrap;font-family:Arial;font-kerning:none;min-width:fit-content;">&#160;</span></p></td>
      <td style="padding-top:0in;padding-left:0in;vertical-align:bottom;padding-bottom:0in;padding-right:0in;text-align:left;"><p style="font-size:10pt;margin-top:2pt;font-family:Times New Roman;margin-bottom:0;text-align:center;"><span style="font-family:Arial;"><ix:nonNumeric id="F_80771a21-114f-4a5a-a942-722817fdbbda" contextRef="C_01_002" name="dei:SecurityExchangeName" format="ixt-sec:exchnameen"><span style="text-transform:uppercase;color:#000000;white-space:pre-wrap;font-weight:bold;font-kerning:none;min-width:fit-content;">Nasdaq</span></ix:nonNumeric></span></p></td>
     </tr>'''
@@ -87,11 +96,82 @@ def parse_stock_first(msft_path, max_rows):
     expanded_block = '\n'.join(expanded_blocks)
     updated_html = html_content.replace(target_tr, expanded_block)
 
-    #also needs to update the htm file and the xsd file.
-    #todo
-
     # Save the updated HTML
     Path(msft_path).write_text(updated_html)
 
     print(f"✅ Modified HTML saved to: {msft_path}")
     return msft_path
+
+def update_msft_namespace_and_refs(msft_html: str, aapl_html: str) -> str:
+    # Replace <html> tag
+    old_html_tag = re.search(r"<html[^>]*>", msft_html)
+    new_html_tag = re.search(r"<html[^>]*>", aapl_html)
+    if old_html_tag and new_html_tag:
+        msft_html = msft_html.replace(old_html_tag.group(0), new_html_tag.group(0))
+
+    # Replace xlink:href
+    aapl_xsd_match = re.search(r'xlink:href="([^"]+\.xsd)"', aapl_html)
+    if aapl_xsd_match:
+        aapl_xsd_href = aapl_xsd_match.group(1)
+        msft_html = re.sub(r'xlink:href="[^"]+\.xsd"', f'xlink:href="{aapl_xsd_href}"', msft_html)
+
+    # Replace CIK
+    cik_match = re.search(r'<xbrli:identifier scheme="http://www.sec.gov/CIK">(\d+)</xbrli:identifier>', aapl_html)
+    if cik_match:
+        new_cik = cik_match.group(1)
+        msft_html = re.sub(
+            r'(<xbrli:identifier scheme="http://www.sec.gov/CIK">)(\d+)(</xbrli:identifier>)',
+            lambda m: f"{m.group(1)}{new_cik}{m.group(3)}",
+            msft_html
+        )
+
+    update_dates_from_reference(msft_html, aapl_html)
+    return msft_html
+
+
+def update_dates_from_reference(msft_html: str, aapl_html: str) -> str:
+    # Extract first startDate and endDate from AAPL file
+    start_date_match = re.search(r"<xbrli:startDate>(.*?)</xbrli:startDate>", aapl_html)
+    end_date_match = re.search(r"<xbrli:endDate>(.*?)</xbrli:endDate>", aapl_html)
+
+    if not (start_date_match and end_date_match):
+        raise ValueError("StartDate or EndDate not found in replacement file.")
+
+    new_start_date = start_date_match.group(1)
+    new_end_date = end_date_match.group(1)
+
+    # Replace all startDate and endDate in MSFT file
+    msft_html = re.sub(r"<xbrli:startDate>.*?</xbrli:startDate>", f"<xbrli:startDate>{new_start_date}</xbrli:startDate>", msft_html)
+    msft_html = re.sub(r"<xbrli:endDate>.*?</xbrli:endDate>", f"<xbrli:endDate>{new_end_date}</xbrli:endDate>", msft_html)
+
+    return msft_html
+
+
+def replace_dei_fields(msft_html: str, aapl_html: str, fields: list) -> str:
+    """
+    Replace specific <ix:nonNumeric> dei fields from AAPL into MSFT HTML content.
+    """
+    for field in fields:
+        pattern = fr'(<ix:nonNumeric[^>]+name="dei:{field}"[^>]*>)(.*?)(</ix:nonNumeric>)'
+
+        # Extract from AAPL
+        aapl_match = re.search(pattern, aapl_html, re.DOTALL)
+        if not aapl_match:
+            continue  # Skip if field not found
+
+        new_val = aapl_match.group(2)
+
+        # Replace in MSFT — all occurrences
+        def replace_one(match):
+            return f"{match.group(1)}{new_val}{match.group(3)}"
+
+        msft_html = re.sub(pattern, replace_one, msft_html, flags=re.DOTALL)
+
+    return msft_html
+
+
+#also needs to update the htm file and the xsd file.
+#todo
+
+def insert_to_xsd():
+    return

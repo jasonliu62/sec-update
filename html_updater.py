@@ -38,30 +38,75 @@ def update_12b_section(msft_path, aapl_path, xsd_path, output_path=None):
 
     updated_html = replace_dei_fields(updated_html, aapl_html, fields_to_replace)
 
+    labels = aapl_values["Security12bTitle"][:max_rows]
+    prefix_match = re.search(r'xmlns:([a-z0-9]+)="http://www\.[a-z0-9.-]+/(\d{8})"', aapl_html)
+    prefix = prefix_match.group(1)
+
+    cik_match = re.search(r'<xbrli:identifier scheme="http://www.sec.gov/CIK">(\d+)</xbrli:identifier>', aapl_html)
+    new_cik = cik_match.group(1)
     # Step 2: Replace data fields inside repeated blocks
     # Get new matches from updated_html
-    for field in fields:
-        pattern = fr'(<ix:nonNumeric[^>]+name="dei:{field}"[^>]*>)(.*?)(</ix:nonNumeric>)'
-        new_matches = list(re.finditer(pattern, updated_html, re.DOTALL))
-        aapl_list = aapl_values[field]
+    context_start_index = 3
+    context_blocks = []
 
-        if len(new_matches) < max_rows:
-            raise ValueError(
-                f"Expected at least {max_rows} <ix:nonNumeric> tags for {field}, found {len(new_matches)}.")
+    # Extract start/end date once
+    start_date_match = re.search(r"<xbrli:startDate>(.*?)</xbrli:startDate>", aapl_html)
+    end_date_match = re.search(r"<xbrli:endDate>(.*?)</xbrli:endDate>", aapl_html)
+    new_start_date = start_date_match.group(1)
+    new_end_date = end_date_match.group(1)
 
-        for i in range(max_rows):
-            tag_start = new_matches[i].group(1)
-            tag_end = new_matches[i].group(3)
+    for i in range(max_rows):
+        sec_title = aapl_values["Security12bTitle"][i] if i < len(aapl_values["Security12bTitle"]) else ""
+        trading_symbol = fallback_symbol
+        exchange_name = "Nasdaq"
 
-            if field == "TradingSymbol":
-                new_val = fallback_symbol
-            elif field == "SecurityExchangeName":
-                new_val = "Nasdaq"
+        # default to no change
+        context_id = None
+
+        if "common stock" not in sec_title.lower():
+            context_id = f"C_01_00{context_start_index + len(context_blocks)}"
+            member_name = normalize_label_to_member(prefix, sec_title)
+            context_block = f"""
+            <xbrli:context id="{context_id}">
+              <xbrli:entity>
+                <xbrli:identifier scheme="http://www.sec.gov/CIK">{new_cik}</xbrli:identifier>
+                <xbrli:segment>
+                  <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">{member_name}</xbrldi:explicitMember>
+                </xbrli:segment>
+              </xbrli:entity>
+              <xbrli:period>
+                <xbrli:startDate>{new_start_date}</xbrli:startDate>
+                <xbrli:endDate>{new_end_date}</xbrli:endDate>
+              </xbrli:period>
+            </xbrli:context>
+            """
+            context_blocks.append(context_block)
+
+        # Replace 12bTitle, TradingSymbol, ExchangeName
+        for field, value in zip(
+                ["Security12bTitle", "TradingSymbol", "SecurityExchangeName"],
+                [sec_title, trading_symbol, exchange_name]
+        ):
+            pattern = fr'(<ix:nonNumeric[^>]+name="dei:{field}"[^>]*>)(.*?)(</ix:nonNumeric>)'
+            matches = list(re.finditer(pattern, updated_html, re.DOTALL))
+            if i >= len(matches):
+                raise ValueError(f"Not enough <ix:nonNumeric> matches for {field} at row {i}")
+
+            full_tag = matches[i].group(0)
+
+            # Only replace contextRef if we made a new one
+            if context_id:
+                new_tag = re.sub(r'contextRef="[^"]+"', f'contextRef="{context_id}"', matches[i].group(1))
+                new_tag = f"{new_tag}{value}{matches[i].group(3)}"
+                updated_html = updated_html.replace(full_tag, new_tag, 1)
             else:
-                new_val = aapl_list[i] if i < len(aapl_list) else ""
+                # Replace value but leave contextRef untouched
+                new_tag = f"{matches[i].group(1)}{value}{matches[i].group(3)}"
+                updated_html = updated_html.replace(full_tag, new_tag, 1)
 
-            new_tag = f"{tag_start}{new_val}{tag_end}"
-            updated_html = updated_html.replace(new_matches[i].group(0), new_tag, 1)
+    # Inject all contexts before </ix:resources>
+    updated_html = re.sub(r"(</ix:resources>)", '\n'.join(context_blocks) + r"\1", updated_html, count=1)
+
 
     if not output_path:
         output_path = os.path.join(os.path.dirname(msft_path), "msft_updated_12b.htm")
@@ -70,6 +115,19 @@ def update_12b_section(msft_path, aapl_path, xsd_path, output_path=None):
         f.write(updated_html)
 
     return f"✅ Updated file saved to: {output_path}"
+
+def normalize_label_to_member(prefix: str, label: str) -> str:
+    # Match the pattern like "0.000% Notes due 2025"
+    # Goal: Extract the part after "Notes" and before "due", and the year after "due"
+    match = re.search(r'Notes\s*(.*?)\s*due\s*(\d+)', label, re.IGNORECASE)
+    if match:
+        amount = re.sub(r'\D', '', match.group(1)) or "0000"
+        year = match.group(2)
+        return f"{prefix}:Notes{amount}due{year}Member"
+    else:
+        # fallback, just remove bad chars
+        clean = re.sub(r'[^A-Za-z0-9]', '', label)
+        return f"{prefix}:{clean}Member"
 
 
 def parse_stock_first(msft_path, max_rows):
@@ -117,6 +175,7 @@ def update_msft_namespace_and_refs(msft_html: str, aapl_html: str) -> str:
 
     # Replace CIK
     cik_match = re.search(r'<xbrli:identifier scheme="http://www.sec.gov/CIK">(\d+)</xbrli:identifier>', aapl_html)
+
     if cik_match:
         new_cik = cik_match.group(1)
         msft_html = re.sub(

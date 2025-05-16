@@ -1,5 +1,6 @@
 import re
 import os
+from datetime import datetime
 from pathlib import Path
 
 def update_12b_section(msft_path, aapl_path, xsd_path, output_path=None):
@@ -34,6 +35,7 @@ def update_12b_section(msft_path, aapl_path, xsd_path, output_path=None):
         "LocalPhoneNumber",  # 996-1010
         "EntityIncorporationStateCountryCode",  # California
         "EntityTaxIdentificationNumber",  # 94-2404110
+        "DocumentPeriodEndDate",
     ]
 
     updated_html = replace_dei_fields(updated_html, aapl_html, fields_to_replace)
@@ -125,29 +127,41 @@ def update_12b_section(msft_path, aapl_path, xsd_path, output_path=None):
     return f"✅ Updated file saved to: {output_path}"
 
 def normalize_label_to_member(prefix: str, label: str) -> str:
-    """
-    Converts labels like '0.875% Notes due 2025' or
-    '3.200% Senior Notes Due 2029' to:
-    'pep:0875NotesDue2025Member' or 'pep:3200SeniorNotesDue2029Member'
-    """
-    match = re.search(r'([0-9.]+)%\s+(.+?)\s+due\s+(\d{4})', label, re.IGNORECASE)
-    if match:
-        rate = match.group(1)
-        words = match.group(2)
-        year = match.group(3)
+    # Try full date pattern first: e.g., "6.500% Notes due August 15, 2062"
+    match_full_date = re.search(r'([0-9.]+)%\s+(.+?)\s+due\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})', label, re.IGNORECASE)
 
-        # Format rate (e.g., 0.875 → 0875)
-        rate_int = int(float(rate) * 1000)
-        rate_str = f"{rate_int:04d}"
+    if match_full_date:
+        rate = match_full_date.group(1)      # e.g., "6.500"
+        descriptor = match_full_date.group(2)  # e.g., "Senior Notes"
+        date_str = match_full_date.group(3)  # e.g., "August 15, 2062"
 
-        # Clean and join descriptor (e.g., "Senior Notes" → "SeniorNotes")
-        words_clean = re.sub(r'[^A-Za-z0-9]', '', words.replace(" ", ""))
+        try:
+            dt = datetime.strptime(date_str, "%B %d, %Y")
+            month = dt.strftime("%b")  # "Aug"
+            day = ordinal(dt.day)     # "Fifteenth"
+            year = dt.year
+            full_date = f"{month}{day}{year}"
+            #full_date = f"{year}"
+        except ValueError:
+            full_date = "0000-00-00"
 
-        return f"{prefix}:{words_clean}{rate_str}Due{year}Member"
+        words_clean = re.sub(r'\W+', '', descriptor)
+        return f"{prefix}:{words_clean}{rate}Due{full_date}Member"
 
-    # fallback if pattern doesn't match
-    fallback = re.sub(r'[^A-Za-z0-9]', '', label)
-    return f"{prefix}:{fallback}Member"
+    # Try year-only pattern: e.g., "6.200% Notes due 2059"
+    match_year_only = re.search(r'([0-9.]+)%\s+(.+?)\s+due\s+(\d{4})', label, re.IGNORECASE)
+
+    if match_year_only:
+        rate = match_year_only.group(1)
+        descriptor = match_year_only.group(2)
+        year = match_year_only.group(3)
+
+        words_clean = re.sub(r'\W+', '', descriptor)
+        return f"{prefix}:{words_clean}{rate}Due{year}Member"
+
+    # fallback
+    clean = re.sub(r'\W+', '', label)
+    return f"{prefix}:{clean}Member"
 
 
 def parse_stock_first(msft_path, max_rows):
@@ -182,10 +196,14 @@ def parse_stock_first(msft_path, max_rows):
 
 def update_msft_namespace_and_refs(msft_html: str, aapl_html: str) -> str:
     # Replace <html> tag
-    old_html_tag = re.search(r"<html[^>]*>", msft_html)
-    new_html_tag = re.search(r"<html[^>]*>", aapl_html)
-    if old_html_tag and new_html_tag:
-        msft_html = msft_html.replace(old_html_tag.group(0), new_html_tag.group(0))
+    match = re.search(r'(xmlns:([a-z0-9]+)="http://www\.[^"]+/(\d{8})")', aapl_html)
+    if match:
+        new_xmlns_attr = match.group(1)  # full xmlns string, e.g., xmlns:f="http://www.ford.com/20250507"
+        prefix = match.group(2)
+
+        # Only add if not already present
+        if f'xmlns:{prefix}=' not in msft_html:
+            msft_html = re.sub(r'(<html\b[^>]*?)>', fr'\1 {new_xmlns_attr}>', msft_html, count=1)
 
     # Replace xlink:href
     aapl_xsd_match = re.search(r'xlink:href="([^"]+\.xsd)"', aapl_html)
@@ -204,7 +222,7 @@ def update_msft_namespace_and_refs(msft_html: str, aapl_html: str) -> str:
             msft_html
         )
 
-    update_dates_from_reference(msft_html, aapl_html)
+    msft_html = update_dates_from_reference(msft_html, aapl_html)
     return msft_html
 
 
@@ -265,20 +283,43 @@ def insert_to_xsd(xsd_path: str, aapl_html: str, labels: list[str], prefix: str)
         if "common stock" in label.lower():
             continue  # skip common stock
 
-        match = re.search(r'([0-9.]+)%\s+(.+?)\s+due\s+(\d{4})', label, re.IGNORECASE)
-        if not match:
-            continue  # skip malformed labels
+        # Try full date pattern: e.g., "6.500% Senior Notes due August 15, 2062"
+        match_full = re.search(r'([0-9.]+)%\s+(.+?)\s+due\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})', label, re.IGNORECASE)
+        if match_full:
+            rate = match_full.group(1)  # "6.500"
+            descriptor = match_full.group(2)  # "Senior Notes"
+            date_str = match_full.group(3)  # "August 15, 2062"
 
-        rate = float(match.group(1))  # e.g., 0.875
-        descriptor = match.group(2)  # e.g., "Senior Notes"
-        year = match.group(3)  # e.g., "2029"
+            # Convert to YYYY-MM-DD
+            try:
+                dt = datetime.strptime(date_str, "%B %d, %Y")
+                month = dt.strftime("%b")  # "Aug"
+                day = ordinal(dt.day)  # "Fifteenth"
+                year = dt.year
+                full_date = f"{month}{day}{year}"
+                # full_date = f"{year}"
+            except ValueError:
+                full_date = "0000-00-00"
 
-        rate_str = f"{int(rate * 1000):04d}"  # → 0875, 3200
-        descriptor_clean = re.sub(r'\W+', '', descriptor)  # Remove spaces/symbols → "SeniorNotes"
+            descriptor_clean = re.sub(r'\W+', '', descriptor)  # "SeniorNotes"
+            member_base = f"{prefix}:{descriptor_clean}{rate}Due{full_date}Member"
+            href = f"{xsd_name}#{member_base}"
+            clean_name = f"{descriptor_clean}{rate}Due{full_date}Member"
 
-        member_base = f"{prefix}_{descriptor_clean}{rate_str}Due{year}Member"
-        href = f"{xsd_name}#{member_base}"
-        clean_name = f"{rate_str}{descriptor_clean}Due{year}Member"
+        else:
+            # Try year-only pattern
+            match_year = re.search(r'([0-9.]+)%\s+(.+?)\s+due\s+(\d{4})', label, re.IGNORECASE)
+            if not match_year:
+                continue  # skip malformed
+
+            rate = match_year.group(1)  # "6.000"
+            descriptor = match_year.group(2)  # "Notes"
+            year = match_year.group(3)
+
+            descriptor_clean = re.sub(r'\W+', '', descriptor)
+            member_base = f"{prefix}:{descriptor_clean}{rate}Due{year}Member"
+            href = f"{xsd_name}#{member_base}"
+            clean_name = f"{descriptor_clean}{rate}Due{year}Member"
 
         # labelLink
         label_links.append(f"""
@@ -334,3 +375,18 @@ def get_new_xsd_name(aapl_html: str) -> str:
         return  aapl_xsd_match.group(1)
     else:
         return ""
+
+
+def ordinal(n: int) -> str:
+    """Convert an integer to an ordinal string (e.g., 1 → First, 2 → Second)."""
+    ORDINAL_MAP = {
+        1: "First", 2: "Second", 3: "Third", 4: "Fourth", 5: "Fifth",
+        6: "Sixth", 7: "Seventh", 8: "Eighth", 9: "Ninth", 10: "Tenth",
+        11: "Eleventh", 12: "Twelfth", 13: "Thirteenth", 14: "Fourteenth",
+        15: "Fifteenth", 16: "Sixteenth", 17: "Seventeenth", 18: "Eighteenth",
+        19: "Nineteenth", 20: "Twentieth", 21: "TwentyFirst", 22: "TwentySecond",
+        23: "TwentyThird", 24: "TwentyFourth", 25: "TwentyFifth", 26: "TwentySixth",
+        27: "TwentySeventh", 28: "TwentyEighth", 29: "TwentyNinth", 30: "Thirtieth",
+        31: "ThirtyFirst"
+    }
+    return ORDINAL_MAP.get(n, str(n))

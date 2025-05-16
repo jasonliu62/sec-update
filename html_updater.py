@@ -40,7 +40,10 @@ def update_12b_section(msft_path, aapl_path, xsd_path, output_path=None):
 
     labels = aapl_values["Security12bTitle"][:max_rows]
     prefix_match = re.search(r'xmlns:([a-z0-9]+)="http://www\.[a-z0-9.-]+/(\d{8})"', aapl_html)
-    prefix = prefix_match.group(1)
+    if prefix_match:
+        prefix = prefix_match.group(1)
+    else:
+        prefix = fallback_symbol.lower()
 
     cik_match = re.search(r'<xbrli:identifier scheme="http://www.sec.gov/CIK">(\d+)</xbrli:identifier>', aapl_html)
     new_cik = cik_match.group(1)
@@ -55,6 +58,8 @@ def update_12b_section(msft_path, aapl_path, xsd_path, output_path=None):
     new_start_date = start_date_match.group(1)
     new_end_date = end_date_match.group(1)
 
+    labels_to_insert = []
+
     for i in range(max_rows):
         sec_title = aapl_values["Security12bTitle"][i] if i < len(aapl_values["Security12bTitle"]) else ""
         trading_symbol = fallback_symbol
@@ -64,6 +69,7 @@ def update_12b_section(msft_path, aapl_path, xsd_path, output_path=None):
         context_id = None
 
         if "common stock" not in sec_title.lower():
+            labels_to_insert.append(sec_title)
             context_id = f"C_01_00{context_start_index + len(context_blocks)}"
             member_name = normalize_label_to_member(prefix, sec_title)
             context_block = f"""
@@ -104,6 +110,8 @@ def update_12b_section(msft_path, aapl_path, xsd_path, output_path=None):
                 new_tag = f"{matches[i].group(1)}{value}{matches[i].group(3)}"
                 updated_html = updated_html.replace(full_tag, new_tag, 1)
 
+    if labels_to_insert:
+        insert_to_xsd(xsd_path, aapl_html, labels_to_insert, prefix)
     # Inject all contexts before </ix:resources>
     updated_html = re.sub(r"(</ix:resources>)", '\n'.join(context_blocks) + r"\1", updated_html, count=1)
 
@@ -117,17 +125,29 @@ def update_12b_section(msft_path, aapl_path, xsd_path, output_path=None):
     return f"✅ Updated file saved to: {output_path}"
 
 def normalize_label_to_member(prefix: str, label: str) -> str:
-    # Match the pattern like "0.000% Notes due 2025"
-    # Goal: Extract the part after "Notes" and before "due", and the year after "due"
-    match = re.search(r'Notes\s*(.*?)\s*due\s*(\d+)', label, re.IGNORECASE)
+    """
+    Converts labels like '0.875% Notes due 2025' or
+    '3.200% Senior Notes Due 2029' to:
+    'pep:0875NotesDue2025Member' or 'pep:3200SeniorNotesDue2029Member'
+    """
+    match = re.search(r'([0-9.]+)%\s+(.+?)\s+due\s+(\d{4})', label, re.IGNORECASE)
     if match:
-        amount = re.sub(r'\D', '', match.group(1)) or "0000"
-        year = match.group(2)
-        return f"{prefix}:Notes{amount}due{year}Member"
-    else:
-        # fallback, just remove bad chars
-        clean = re.sub(r'[^A-Za-z0-9]', '', label)
-        return f"{prefix}:{clean}Member"
+        rate = match.group(1)
+        words = match.group(2)
+        year = match.group(3)
+
+        # Format rate (e.g., 0.875 → 0875)
+        rate_int = int(float(rate) * 1000)
+        rate_str = f"{rate_int:04d}"
+
+        # Clean and join descriptor (e.g., "Senior Notes" → "SeniorNotes")
+        words_clean = re.sub(r'[^A-Za-z0-9]', '', words.replace(" ", ""))
+
+        return f"{prefix}:{words_clean}{rate_str}Due{year}Member"
+
+    # fallback if pattern doesn't match
+    fallback = re.sub(r'[^A-Za-z0-9]', '', label)
+    return f"{prefix}:{fallback}Member"
 
 
 def parse_stock_first(msft_path, max_rows):
@@ -232,5 +252,85 @@ def replace_dei_fields(msft_html: str, aapl_html: str, fields: list) -> str:
 #also needs to update the htm file and the xsd file.
 #todo
 
-def insert_to_xsd():
-    return
+def insert_to_xsd(xsd_path: str, aapl_html: str, labels: list[str], prefix: str):
+    xsd_text = Path(xsd_path).read_text(encoding='utf-8')
+    xsd_name = get_new_xsd_name(aapl_html)
+
+    label_links = []
+    presentation_links = []
+    definition_links = []
+    element_declarations = []
+
+    for label in labels:
+        if "common stock" in label.lower():
+            continue  # skip common stock
+
+        match = re.search(r'([0-9.]+)%\s+(.+?)\s+due\s+(\d{4})', label, re.IGNORECASE)
+        if not match:
+            continue  # skip malformed labels
+
+        rate = float(match.group(1))  # e.g., 0.875
+        descriptor = match.group(2)  # e.g., "Senior Notes"
+        year = match.group(3)  # e.g., "2029"
+
+        rate_str = f"{int(rate * 1000):04d}"  # → 0875, 3200
+        descriptor_clean = re.sub(r'\W+', '', descriptor)  # Remove spaces/symbols → "SeniorNotes"
+
+        member_base = f"{prefix}_{descriptor_clean}{rate_str}Due{year}Member"
+        href = f"{xsd_name}#{member_base}"
+        clean_name = f"{rate_str}{descriptor_clean}Due{year}Member"
+
+        # labelLink
+        label_links.append(f"""
+    <link:loc xlink:type="locator" xlink:href="{href}" xlink:label="{member_base}"/>
+    <link:labelArc xlink:type="arc"
+        xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label"
+        xlink:from="{member_base}"
+        xlink:to="{member_base}_lbl"/>""")
+
+        # presentationLink
+        presentation_links.append(f"""
+    <link:loc xlink:type="locator" xlink:href="{href}" xlink:label="{member_base}"/>
+    <link:presentationArc xlink:type="arc"
+        xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child"
+        xlink:from="us-gaap_ClassOfStockDomain"
+        xlink:to="{member_base}" order="1" priority="2" use="optional"
+        preferredLabel="http://www.xbrl.org/2003/role/terseLabel"/>""")
+
+        # definitionLink
+        definition_links.append(f"""
+    <link:loc xlink:type="locator" xlink:href="{href}" xlink:label="{member_base}"/>
+    <link:definitionArc xlink:type="arc"
+        xlink:arcrole="http://xbrl.org/int/dim/arcrole/domain-member"
+        xlink:from="us-gaap_ClassOfStockDomain"
+        xlink:to="{member_base}" priority="2" use="optional"/>""")
+
+        # xsd:element
+        element_declarations.append(f"""
+    <xsd:element
+        id="{member_base}"
+        name="{clean_name}"
+        type="dtr-types:domainItemType"
+        substitutionGroup="xbrli:item"
+        xbrli:periodType="duration"
+        nillable="true"
+        abstract="true"/>""")
+
+    # Insert everything once
+    xsd_text = re.sub(r"(</link:labelLink>)", "\n".join(label_links) + r"\n\1", xsd_text, count=1)
+    xsd_text = re.sub(r"(</link:presentationLink>)", "\n".join(presentation_links) + r"\n\1", xsd_text, count=1)
+    xsd_text = re.sub(r"(</link:definitionLink>)", "\n".join(definition_links) + r"\n\1", xsd_text, count=1)
+    xsd_text = re.sub(r"(</xsd:schema>)", "\n".join(element_declarations) + r"\n\1", xsd_text, count=1)
+
+    # Save once
+    new_xsd_path = os.path.join(os.path.dirname(xsd_path), xsd_name)
+    Path(new_xsd_path).write_text(xsd_text, encoding='utf-8')
+    print(f"✅ XSD updated and saved as {new_xsd_path} with {len(labels)} members.")
+
+
+def get_new_xsd_name(aapl_html: str) -> str:
+    aapl_xsd_match = re.search(r'xlink:href="([^"]+\.xsd)"', aapl_html)
+    if aapl_xsd_match:
+        return  aapl_xsd_match.group(1)
+    else:
+        return ""

@@ -14,7 +14,7 @@ def update_12b_section(msft_path, aapl_path, xsd_path, output_path=None):
         pattern = fr'(<ix:nonNumeric[^>]+name="dei:{field}"[^>]*>)(.*?)(</ix:nonNumeric>)'
         aapl_values[field] = [m.group(2) for m in re.finditer(pattern, aapl_html, re.DOTALL)]
 
-    fallback_symbol = aapl_values["TradingSymbol"][0] if aapl_values["TradingSymbol"] else "AAPL"
+    fallback_symbol = aapl_values["TradingSymbol"][0] if aapl_values["TradingSymbol"] else ""
     max_rows = max(len(aapl_values[field]) for field in fields)
 
     msft_path = parse_stock_first(msft_path, max_rows)
@@ -64,7 +64,10 @@ def update_12b_section(msft_path, aapl_path, xsd_path, output_path=None):
 
     for i in range(max_rows):
         sec_title = aapl_values["Security12bTitle"][i] if i < len(aapl_values["Security12bTitle"]) else ""
-        trading_symbol = fallback_symbol
+        # Fix trading symbol row-wise: fill in fallback if it's '-', else keep it
+        raw_symbol = aapl_values["TradingSymbol"][i] if i < len(aapl_values["TradingSymbol"]) else fallback_symbol
+        trading_symbol = fallback_symbol if raw_symbol.strip() in ['—', '-', ''] else raw_symbol
+
         exchange_name = "Nasdaq"
 
         # default to no change

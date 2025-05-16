@@ -69,8 +69,10 @@ def update_12b_section(msft_path, aapl_path, xsd_path, output_path=None):
 
         # default to no change
         context_id = None
-
-        if "common stock" not in sec_title.lower():
+        if max_rows == 1:
+            context_id = "C_01_001"
+            # todo: delete C_01_002?
+        elif "common stock" not in sec_title.lower():
             labels_to_insert.append(sec_title)
             context_id = f"C_01_00{context_start_index + len(context_blocks)}"
             member_name = normalize_label_to_member(prefix, sec_title)
